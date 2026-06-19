@@ -283,28 +283,35 @@ function getAdData() {
   const adsRaw = parsed.ads;
   const oppRaw = parsed.opp;
 
-  // Build conv map by ad name
+  // Build conv map by ad name — sum duplicates across ad sets
   const convMap = {};
   convRaw.forEach(r => {
-    const name = r['Ad'] || r['ad'] || '';
-    convMap[name] = {
-      fbConv: parseFloat(r['Conversions'] || r['conversions'] || 0),
-      spend: parseFloat(r['Spend'] || r['spend'] || 0),
-      cpl: parseFloat(r['Cost Per Conversion'] || r['cost_per_conversion'] || 0),
-      clicks: parseFloat(r['Clicks'] || 0),
-      reach: parseFloat(r['Reach'] || 0),
-      ctr: parseFloat(r['Click-Through Rate (CTR)'] || r['CTR'] || 0),
-      cpc: parseFloat(r['Cost Per Click (CPC)'] || r['CPC'] || 0),
-    };
+    const name = (r['Ad'] || r['ad'] || '').trim();
+    if (!name) return;
+    if (!convMap[name]) convMap[name] = { fbConv:0, spend:0, clicks:0, reach:0, ctr_sum:0, cpc_sum:0, count:0 };
+    convMap[name].fbConv  += parseFloat(r['Conversions'] || r['conversions'] || 0);
+    convMap[name].spend   += parseFloat(r['Spend'] || r['spend'] || 0);
+    convMap[name].clicks  += parseFloat(r['Clicks'] || 0);
+    convMap[name].reach   += parseFloat(r['Reach'] || 0);
+    convMap[name].ctr_sum += parseFloat(r['Click-Through Rate (CTR)'] || r['CTR'] || 0);
+    convMap[name].cpc_sum += parseFloat(r['Cost Per Click (CPC)'] || r['CPC'] || 0);
+    convMap[name].count++;
+  });
+  // Finalize CPL and averaged rates
+  Object.keys(convMap).forEach(name => {
+    const c = convMap[name];
+    c.cpl = c.fbConv > 0 ? c.spend / c.fbConv : 0;
+    c.ctr = c.count > 0 ? c.ctr_sum / c.count : 0;
+    c.cpc = c.count > 0 ? c.cpc_sum / c.count : 0;
   });
 
-  // Build opp map by ad name
+  // Build opp map — support both UTM Content (First) and UTM Content (Last)
   const oppMap = {};
   const BOOKED = ['Scheduled','scheduled','Booked','booked','Appointment Set'];
   const OOA = ['Out of Area','out of area','Out Of Area'];
   const stages = {};
   oppRaw.forEach(r => {
-    const name = (r['UTM Content (First)'] || '').trim();
+    const name = (r['UTM Content (First)'] || r['UTM Content (Last)'] || r['utm_content'] || '').trim();
     const stage = (r['Stage'] || '').trim();
     if (!name) return;
     if (!oppMap[name]) oppMap[name] = { leads: 0, booked: 0, ooa: 0, stages: {} };
@@ -315,18 +322,30 @@ function getAdData() {
     stages[stage] = (stages[stage] || 0) + 1;
   });
 
-  // Build delivery map from ads manager
+  // Build delivery map from ads manager — handle duplicate ad names across ad sets
   const delivMap = {};
   const rankMap = {};
+  const freqMap = {};
   adsRaw.forEach(r => {
     const name = (r['Ad name'] || r['ad_name'] || '').trim();
-    delivMap[name] = (r['Ad delivery'] || r['ad_delivery'] || 'inactive').toLowerCase();
-    rankMap[name] = {
+    if (!name) return;
+    const delivery = (r['Ad delivery'] || r['ad_delivery'] || 'inactive').toLowerCase();
+    // If any instance is active, mark as active
+    if (!delivMap[name] || delivery === 'active') delivMap[name] = delivery;
+    // Keep highest quality rank seen
+    if (!rankMap[name]) rankMap[name] = {
       quality: r['Quality ranking'] || '-',
       engagement: r['Engagement rate ranking'] || '-',
       conversion: r['Conversion rate ranking'] || '-',
-      freq: parseFloat(r['Frequency'] || 0),
     };
+    // Average frequency across instances
+    const freq = parseFloat(r['Frequency'] || 0);
+    if (!freqMap[name]) freqMap[name] = { sum: 0, count: 0 };
+    if (freq > 0) { freqMap[name].sum += freq; freqMap[name].count++; }
+  });
+  Object.keys(rankMap).forEach(name => {
+    rankMap[name].freq = freqMap[name] && freqMap[name].count > 0
+      ? freqMap[name].sum / freqMap[name].count : 0;
   });
 
   // Merge
@@ -561,7 +580,7 @@ function renderWeek(ads) {
   // Top ad this week
   const weekAdMap = {};
   weekOpps.forEach(r => {
-    const n = (r['UTM Content (First)']||'').trim()||'Unknown';
+    const n = (r['UTM Content (First)']||r['UTM Content (Last)']||'').trim()||'Unknown';
     weekAdMap[n] = (weekAdMap[n]||0)+1;
   });
   const topWeekAd = Object.entries(weekAdMap).sort((a,b)=>b[1]-a[1])[0];
@@ -583,7 +602,7 @@ function renderWeek(ads) {
     [...weekOpps].reverse().forEach(r => {
       const d = new Date(r['Created On']);
       const ds = d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
-      const adName = (r['UTM Content (First)']||'Unknown').slice(0,35);
+      const adName = (r['UTM Content (First)']||r['UTM Content (Last)']||'Unknown').slice(0,35);
       const stage = r['Stage']||'';
       html += `<div class="week-entry">
         <div class="week-date">${ds}</div>
